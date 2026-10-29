@@ -53,6 +53,9 @@ jobs:
           if (-not $exe) { throw 'MinGW-w64 安装失败，找不到 gcc' }
           Split-Path $exe | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $exe --version | Select-Object -First 1
+      # 仓库内 pubspec.lock 缺失 video_player 等依赖（锁文件过期），
+      # 先普通 pub get 重生成锁，再让脚本内 --enforce-lockfile 通过。
+      - run: flutter pub get
       - run: python scripts/build_windows.py ${{ matrix.arguments }}
       - uses: actions/upload-artifact@v4
         with:
