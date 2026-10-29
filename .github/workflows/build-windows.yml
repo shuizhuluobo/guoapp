@@ -1,0 +1,111 @@
+name: Build Windows x64 portable
+
+on:
+  push:
+    branches: [ci/windows-portable]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - edition: hongguojian
+            arguments: ''
+          - edition: zhenguojian
+            arguments: '--all-sources'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - name: Set up MinGW-w64
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          $exe = Get-ChildItem -Path 'C:\ProgramData\mingw64', 'C:\ProgramData\chocolatey\lib\mingw' `
+                   -Recurse -Include 'x86_64-w64-mingw32-gcc.exe', 'gcc.exe' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1 -ExpandProperty FullName
+          if (-not $exe) { $exe = (Get-Command x86_64-w64-mingw32-gcc -ErrorAction SilentlyContinue).Source }
+          if (-not $exe) { throw 'MinGW-w64 安装失败，找不到 gcc' }
+          Split-Path $exe | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $exe --version | Select-Object -First 1
+      - run: python scripts/build_windows.py ${{ matrix.arguments }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.edition }}-windows
+          path: dist/windows/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: windows
+    if: always() && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 打包并校验
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1)
+          mkdir -p release
+          for directory in artifacts/*/; do
+            for file in "$directory"*; do
+              [ -f "$file" ] || continue
+              name=$(basename "$file")
+              [ "$name" = "SHA256SUMS.txt" ] && continue
+              cp "$file" "release/$name"
+            done
+          done
+          cd release
+          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1)
+          tag="win-${version//+/-}"
+          {
+            printf '%s\n\n' "Windows 10/11 x64 便携版 ${version}（fork CI 构建，未做设备验收）："
+            printf '%s\n' "- hongguojian-${version}-windows-x64.zip：红果鉴，仅红果站源"
+            printf '%s\n' "- zhenguojian-${version}-windows-x64.zip：真果鉴，全部站源"
+            printf '\n%s\n' "解压后运行 hongguojian.exe 或 zhenguojian.exe，保留所有 DLL 与 data 目录。校验：SHA256SUMS.txt"
+          } > notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+            gh release edit "$tag" --title "红果鉴 / 真果鉴 Windows 便携版 ${version}" --notes-file notes.md
+          else
+            gh release create "$tag" release/* --title "红果鉴 / 真果鉴 Windows 便携版 ${version}" --notes-file notes.md
+          fi
